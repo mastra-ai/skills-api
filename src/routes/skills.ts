@@ -5,7 +5,8 @@
 
 import { Hono } from 'hono';
 
-import { fetchSkillFromGitHub } from '../github/index.js';
+import { fetchSkillFromGitHub, fetchSkillFiles } from '../github/index.js';
+import { isS3Configured, loadSkillFilesFromS3, saveSkillFilesToS3 } from '../storage/s3.js';
 import {
   getSkills,
   getMetadata,
@@ -284,6 +285,51 @@ skillsRouter.get('/:owner/:repo/:skillId', c => {
     ...skill,
     installCommand,
   });
+});
+
+/**
+ * GET /api/skills/:owner/:repo/:skillId/files
+ * Fetch all files in a skill's directory from GitHub
+ * Returns file contents with appropriate encoding (utf-8 for text, base64 for binary)
+ * Results are cached in S3 when configured
+ */
+skillsRouter.get('/:owner/:repo/:skillId/files', async c => {
+  const owner = c.req.param('owner');
+  const repo = c.req.param('repo');
+  const skillId = c.req.param('skillId');
+  const branch = c.req.query('branch') || 'main';
+
+  // Check S3 cache first
+  if (isS3Configured()) {
+    const cached = await loadSkillFilesFromS3(owner, repo, skillId);
+    if (cached) {
+      return c.json(cached);
+    }
+  }
+
+  // Fetch from GitHub
+  const result = await fetchSkillFiles(owner, repo, skillId, branch);
+
+  if (!result.success || !result.files) {
+    return c.json({ error: result.error }, 404);
+  }
+
+  const response = {
+    skillId,
+    owner,
+    repo,
+    branch,
+    files: result.files,
+  };
+
+  // Cache in S3 (fire and forget)
+  if (isS3Configured()) {
+    saveSkillFilesToS3(owner, repo, skillId, response).catch((err) =>
+      console.error('[S3] Failed to cache skill files:', err),
+    );
+  }
+
+  return c.json(response);
 });
 
 /**

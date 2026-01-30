@@ -128,6 +128,63 @@ export async function existsInS3(): Promise<boolean> {
 }
 
 /**
+ * Load cached skill files from S3
+ */
+export async function loadSkillFilesFromS3(
+  owner: string,
+  repo: string,
+  skillId: string,
+): Promise<unknown | null> {
+  if (!S3_BUCKET) return null;
+
+  const key = `skill-files/${owner}/${repo}/${skillId}.json`;
+  try {
+    const client = getS3Client();
+    const command = new GetObjectCommand({ Bucket: S3_BUCKET, Key: key });
+    const response = await client.send(command);
+    const body = await response.Body?.transformToString();
+    if (!body) return null;
+
+    console.info(`[S3] Cache hit for skill files: ${owner}/${repo}/${skillId}`);
+    return JSON.parse(body);
+  } catch (error: unknown) {
+    const err = error as { name?: string };
+    if (err.name === 'NoSuchKey' || err.name === 'NotFound') return null;
+    return null;
+  }
+}
+
+/**
+ * Cache skill files to S3
+ */
+export async function saveSkillFilesToS3(
+  owner: string,
+  repo: string,
+  skillId: string,
+  data: unknown,
+): Promise<boolean> {
+  if (!S3_BUCKET) return false;
+
+  const key = `skill-files/${owner}/${repo}/${skillId}.json`;
+  try {
+    const client = getS3Client();
+    const command = new PutObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      Body: JSON.stringify(data),
+      ContentType: 'application/json',
+    });
+    await client.send(command);
+    console.info(`[S3] Cached skill files: ${owner}/${repo}/${skillId}`);
+    return true;
+  } catch (error: unknown) {
+    const err = error as { message?: string };
+    console.error(`[S3] Failed to cache skill files:`, err.message);
+    return false;
+  }
+}
+
+/**
  * Get S3 storage info
  */
 export function getS3Info(): {
