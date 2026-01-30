@@ -570,7 +570,7 @@ td a:hover { color: var(--accent); }
 <footer>
   <div class="container footer">
     <span>Last updated ${escapeHtml(formattedDate)}</span>
-    <span><a href="https://github.com/mastra-ai/skills-api">GitHub</a> &middot; <a href="https://skills.sh">skills.sh</a> &middot; Apache-2.0</span>
+    <span><a href="https://github.com/mastra-ai/skills-api">GitHub</a> &middot; <a href="https://skills.sh">skills.sh</a> &middot; MIT</span>
   </div>
 </footer>
 

@@ -162,4 +162,4 @@ pnpm scrape     # Update skills data
 
 ## License
 
-Apache-2.0
+MIT
