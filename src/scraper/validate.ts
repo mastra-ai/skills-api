@@ -181,9 +181,10 @@ export async function filterStaleSkills(
   const kept: EnrichedSkill[] = [];
   const removedSkills: Array<{ skillId: string; source: string }> = [];
   let reposChecked = 0;
+  let reposSkipped = 0;
 
-  // Process repos in parallel batches to respect rate limits
-  const BATCH_SIZE = 20;
+  // Process repos in parallel batches to avoid GitHub secondary rate limits
+  const BATCH_SIZE = 10;
   const repos = Array.from(byRepo.entries());
 
   for (let i = 0; i < repos.length; i += BATCH_SIZE) {
@@ -196,6 +197,7 @@ export async function filterStaleSkills(
 
         // If we couldn't fetch the tree (rate limit, network error), keep all skills
         if (actualDirs === null) {
+          reposSkipped++;
           return { kept: repoSkills, removed: [] as Array<{ skillId: string; source: string }> };
         }
 
@@ -227,10 +229,10 @@ export async function filterStaleSkills(
           }
         }
 
-        // We know there are (repoSkills.length - actualDirs.size) stale entries.
-        // The unmatched ones are the stale candidates.
-        // If we have more matched than actual dirs, keep all matched (some dirs have multiple names).
-        // Otherwise, drop unmatched skills.
+        if (unmatched.length > 0) {
+          console.info(`[Validate] ${source}: registry=${repoSkills.length}, actual=${actualDirs.size}, dropping ${unmatched.map(s => s.skillId).join(', ')}`);
+        }
+
         return {
           kept: matched,
           removed: unmatched.map((s) => ({ skillId: s.skillId, source: s.source })),
@@ -244,16 +246,12 @@ export async function filterStaleSkills(
     }
   }
 
+  console.info(`[Validate] Repos checked: ${reposChecked}, skipped (API failures): ${reposSkipped}`);
+
   if (removedSkills.length > 0) {
-    console.info(`[Validate] Removed ${removedSkills.length} stale skills from ${reposChecked} repos checked`);
-    for (const s of removedSkills.slice(0, 20)) {
-      console.info(`[Validate]   - ${s.source}/${s.skillId}`);
-    }
-    if (removedSkills.length > 20) {
-      console.info(`[Validate]   ... and ${removedSkills.length - 20} more`);
-    }
+    console.info(`[Validate] Removed ${removedSkills.length} stale skills`);
   } else {
-    console.info(`[Validate] No stale skills found (checked ${reposChecked} repos)`);
+    console.info(`[Validate] No stale skills found`);
   }
 
   return { filtered: kept, removed: removedSkills.length, removedSkills, reposChecked, skipped: false };
@@ -279,7 +277,12 @@ async function fetchSkillDirs(
     });
 
     // Rate limited or error — don't remove skills we can't verify
-    if (!response.ok) return null;
+    if (!response.ok) {
+      if (response.status === 403 || response.status === 429) {
+        console.warn(`[Validate] Rate limited fetching tree for ${owner}/${repo} (${response.status})`);
+      }
+      return null;
+    }
 
     const tree = (await response.json()) as { tree: Array<{ path: string; type: string }> };
     const dirs = new Set<string>();
