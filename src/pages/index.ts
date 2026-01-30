@@ -477,6 +477,7 @@ td a:hover { color: var(--accent); }
       <h1 class="brand">skills<span class="dot">-</span>api</h1>
       <p class="tagline">API for skills.sh</p>
       <div class="hero-links">
+        <a href="https://github.com/mastra-ai/skills-api">GitHub</a>
         <a href="https://skills.sh">skills.sh</a>
         <a href="https://agentskills.io">Specification</a>
         <a href="#api-reference">API Reference</a>
@@ -569,7 +570,7 @@ td a:hover { color: var(--accent); }
 <footer>
   <div class="container footer">
     <span>Last updated ${escapeHtml(formattedDate)}</span>
-    <span><a href="https://skills.sh">skills.sh</a> &middot; Apache-2.0</span>
+    <span><a href="https://github.com/mastra-ai/skills-api">GitHub</a> &middot; <a href="https://skills.sh">skills.sh</a> &middot; Apache-2.0</span>
   </div>
 </footer>
 
