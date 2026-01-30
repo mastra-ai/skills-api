@@ -97,18 +97,31 @@ function saveToFilesystem(data: ScrapedData): boolean {
  * Priority: S3 > Filesystem > Bundled
  */
 export async function loadSkillsDataAsync(): Promise<ScrapedData> {
+  const s3Configured = isS3Configured();
+
   // Try S3 first
-  if (isS3Configured()) {
+  if (s3Configured) {
     const s3Data = await loadFromS3();
     if (s3Data) return s3Data;
   }
 
   // Try local filesystem
   const fsData = loadFromFilesystem();
-  if (fsData) return fsData;
+  if (fsData) {
+    if (s3Configured) {
+      console.info('[Storage] S3 bucket empty, seeding from filesystem data');
+      saveToS3(fsData).catch((err) => console.error('[Storage] Failed to seed S3:', err));
+    }
+    return fsData;
+  }
 
   // Fall back to bundled
-  return loadFromBundled();
+  const bundledData = loadFromBundled();
+  if (s3Configured) {
+    console.info('[Storage] S3 bucket empty, seeding from bundled data');
+    saveToS3(bundledData).catch((err) => console.error('[Storage] Failed to seed S3:', err));
+  }
+  return bundledData;
 }
 
 /**
