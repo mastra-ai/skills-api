@@ -271,7 +271,7 @@ async function fetchSkillDirs(
     const response = await fetch(url, {
       headers: {
         Accept: 'application/vnd.github.v3+json',
-        Authorization: `token ${token}`,
+        Authorization: `Bearer ${token}`,
         'User-Agent': 'skills-api',
       },
     });
