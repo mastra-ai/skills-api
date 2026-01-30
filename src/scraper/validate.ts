@@ -5,6 +5,20 @@
 
 import type { ScrapedData } from '../registry/types.js';
 import type { EnrichedSkill } from './scrape.js';
+import { isS3Configured, loadValidationCacheFromS3, saveValidationCacheToS3 } from '../storage/s3.js';
+
+/**
+ * Cached validation result per repo.
+ * Stores the actual directory names so we can filter without re-fetching.
+ */
+interface RepoCacheEntry {
+  validatedAt: string;
+  dirs: string[];
+}
+
+export type ValidationCache = Record<string, RepoCacheEntry>;
+
+const VALIDATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export interface ValidationResult {
   valid: boolean;
@@ -168,6 +182,14 @@ export async function filterStaleSkills(
     return { filtered: skills, removed: 0, removedSkills: [], reposChecked: 0, skipped: true };
   }
 
+  // Load validation cache from S3
+  let cache: ValidationCache = {};
+  if (isS3Configured()) {
+    cache = (await loadValidationCacheFromS3()) || {};
+  }
+
+  const now = Date.now();
+
   // Group skills by source repo
   const byRepo = new Map<string, EnrichedSkill[]>();
   for (const skill of skills) {
@@ -176,67 +198,62 @@ export async function filterStaleSkills(
     byRepo.set(skill.source, existing);
   }
 
-  console.info(`[Validate] Checking ${byRepo.size} repos for stale skills...`);
+  // Split repos into cached (still valid) and needs-check
+  const reposToCheck: Array<[string, EnrichedSkill[]]> = [];
+  const cachedRepos: Array<[string, EnrichedSkill[]]> = [];
+
+  for (const [source, repoSkills] of byRepo) {
+    const cached = cache[source];
+    if (cached && (now - new Date(cached.validatedAt).getTime()) < VALIDATION_TTL_MS) {
+      cachedRepos.push([source, repoSkills]);
+    } else {
+      reposToCheck.push([source, repoSkills]);
+    }
+  }
+
+  console.info(`[Validate] ${byRepo.size} repos total: ${cachedRepos.length} cached, ${reposToCheck.length} to check`);
 
   const kept: EnrichedSkill[] = [];
   const removedSkills: Array<{ skillId: string; source: string }> = [];
   let reposChecked = 0;
   let reposSkipped = 0;
 
-  // Process repos in parallel batches to avoid GitHub secondary rate limits
-  const BATCH_SIZE = 10;
-  const repos = Array.from(byRepo.entries());
+  // Apply cached results for repos we've recently validated
+  for (const [source, repoSkills] of cachedRepos) {
+    const cachedDirs = new Set(cache[source].dirs);
+    const { keptSkills, droppedSkills } = filterRepoSkills(source, repoSkills, cachedDirs);
+    kept.push(...keptSkills);
+    removedSkills.push(...droppedSkills);
+  }
 
-  for (let i = 0; i < repos.length; i += BATCH_SIZE) {
-    const batch = repos.slice(i, i + BATCH_SIZE);
+  // Fetch fresh data for repos that need checking
+  const BATCH_SIZE = 10;
+
+  for (let i = 0; i < reposToCheck.length; i += BATCH_SIZE) {
+    const batch = reposToCheck.slice(i, i + BATCH_SIZE);
 
     const results = await Promise.all(
       batch.map(async ([source, repoSkills]) => {
         const [owner, repo] = source.split('/');
         const actualDirs = await fetchSkillDirs(owner, repo, token);
 
-        // If we couldn't fetch the tree (rate limit, network error), keep all skills
+        // If we couldn't fetch the tree, keep all skills and don't cache
         if (actualDirs === null) {
           reposSkipped++;
-          return { kept: repoSkills, removed: [] as Array<{ skillId: string; source: string }> };
+          return { source, kept: repoSkills, removed: [] as Array<{ skillId: string; source: string }>, dirs: null };
         }
 
         reposChecked++;
 
-        // If repo has no SKILL.md files at all, it was deleted or restructured
-        if (actualDirs.size === 0) {
-          return {
-            kept: [] as EnrichedSkill[],
-            removed: repoSkills.map((s) => ({ skillId: s.skillId, source: s.source })),
-          };
-        }
-
-        // If actual count >= registry count, no stales possible
-        if (actualDirs.size >= repoSkills.length) {
-          return { kept: repoSkills, removed: [] as Array<{ skillId: string; source: string }> };
-        }
-
-        // Registry has more skills than actual dirs — some are stale.
-        // Keep skills whose skillId matches an actual directory name.
-        const matched: EnrichedSkill[] = [];
-        const unmatched: EnrichedSkill[] = [];
-
-        for (const skill of repoSkills) {
-          if (actualDirs.has(skill.skillId) || actualDirs.has(skill.name)) {
-            matched.push(skill);
-          } else {
-            unmatched.push(skill);
-          }
-        }
-
-        if (unmatched.length > 0) {
-          console.info(`[Validate] ${source}: registry=${repoSkills.length}, actual=${actualDirs.size}, dropping ${unmatched.map(s => s.skillId).join(', ')}`);
-        }
-
-        return {
-          kept: matched,
-          removed: unmatched.map((s) => ({ skillId: s.skillId, source: s.source })),
+        // Update cache with fresh data
+        cache[source] = {
+          validatedAt: new Date().toISOString(),
+          dirs: Array.from(actualDirs),
         };
+
+        const { keptSkills, droppedSkills } = filterRepoSkills(source, repoSkills, actualDirs);
+
+        return { source, kept: keptSkills, removed: droppedSkills, dirs: actualDirs };
       }),
     );
 
@@ -246,7 +263,14 @@ export async function filterStaleSkills(
     }
   }
 
-  console.info(`[Validate] Repos checked: ${reposChecked}, skipped (API failures): ${reposSkipped}`);
+  // Save updated cache to S3
+  if (isS3Configured()) {
+    saveValidationCacheToS3(cache).catch((err) =>
+      console.error('[Validate] Failed to save validation cache:', err),
+    );
+  }
+
+  console.info(`[Validate] Repos checked: ${reposChecked}, cached: ${cachedRepos.length}, skipped: ${reposSkipped}`);
 
   if (removedSkills.length > 0) {
     console.info(`[Validate] Removed ${removedSkills.length} stale skills`);
@@ -255,6 +279,46 @@ export async function filterStaleSkills(
   }
 
   return { filtered: kept, removed: removedSkills.length, removedSkills, reposChecked, skipped: false };
+}
+
+/**
+ * Filter skills for a single repo given its actual directory set.
+ */
+function filterRepoSkills(
+  source: string,
+  repoSkills: EnrichedSkill[],
+  actualDirs: Set<string>,
+): { keptSkills: EnrichedSkill[]; droppedSkills: Array<{ skillId: string; source: string }> } {
+  if (actualDirs.size === 0) {
+    return {
+      keptSkills: [],
+      droppedSkills: repoSkills.map((s) => ({ skillId: s.skillId, source: s.source })),
+    };
+  }
+
+  if (actualDirs.size >= repoSkills.length) {
+    return { keptSkills: repoSkills, droppedSkills: [] };
+  }
+
+  const matched: EnrichedSkill[] = [];
+  const unmatched: EnrichedSkill[] = [];
+
+  for (const skill of repoSkills) {
+    if (actualDirs.has(skill.skillId) || actualDirs.has(skill.name)) {
+      matched.push(skill);
+    } else {
+      unmatched.push(skill);
+    }
+  }
+
+  if (unmatched.length > 0) {
+    console.info(`[Validate] ${source}: registry=${repoSkills.length}, actual=${actualDirs.size}, dropping ${unmatched.map(s => s.skillId).join(', ')}`);
+  }
+
+  return {
+    keptSkills: matched,
+    droppedSkills: unmatched.map((s) => ({ skillId: s.skillId, source: s.source })),
+  };
 }
 
 /**

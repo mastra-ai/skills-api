@@ -185,6 +185,54 @@ export async function saveSkillFilesToS3(
 }
 
 /**
+ * Load validation cache from S3
+ */
+export async function loadValidationCacheFromS3(): Promise<Record<string, { validatedAt: string; dirs: string[] }> | null> {
+  if (!S3_BUCKET) return null;
+
+  const key = 'validation-cache.json';
+  try {
+    const client = getS3Client();
+    const command = new GetObjectCommand({ Bucket: S3_BUCKET, Key: key });
+    const response = await client.send(command);
+    const body = await response.Body?.transformToString();
+    if (!body) return null;
+
+    console.info('[S3] Loaded validation cache');
+    return JSON.parse(body);
+  } catch (error: unknown) {
+    const err = error as { name?: string };
+    if (err.name === 'NoSuchKey' || err.name === 'NotFound') return null;
+    return null;
+  }
+}
+
+/**
+ * Save validation cache to S3
+ */
+export async function saveValidationCacheToS3(data: Record<string, unknown>): Promise<boolean> {
+  if (!S3_BUCKET) return false;
+
+  const key = 'validation-cache.json';
+  try {
+    const client = getS3Client();
+    const command = new PutObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      Body: JSON.stringify(data),
+      ContentType: 'application/json',
+    });
+    await client.send(command);
+    console.info('[S3] Saved validation cache');
+    return true;
+  } catch (error: unknown) {
+    const err = error as { message?: string };
+    console.error('[S3] Failed to save validation cache:', err.message);
+    return false;
+  }
+}
+
+/**
  * Get S3 storage info
  */
 export function getS3Info(): {
