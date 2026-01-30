@@ -152,8 +152,8 @@ export async function saveSkillsDataAsync(data: ScrapedData): Promise<{ s3: bool
   // Also save to filesystem if configured (as backup)
   if (getLocalDataDir()) {
     results.filesystem = saveToFilesystem(data);
-  } else {
-    // Development: save to bundled location
+  } else if (!results.s3) {
+    // Development only: save to bundled location when S3 is not in use
     try {
       writeFileSync(BUNDLED_DATA_PATH, JSON.stringify(data, null, 2));
       console.info('[Storage] Saved data to bundled location');
