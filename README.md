@@ -1,5 +1,7 @@
 # @mastra/skills-api
 
+![skills-api](assets/screenshot.png)
+
 API server for [skills.sh](https://skills.sh) -- the open marketplace for Agent Skills.
 
 Serves a browsable registry of 34,000+ skills from 2,800+ repositories. Use it as a standalone server or as a library in your own project.
