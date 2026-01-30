@@ -5,13 +5,13 @@ describe('Skills API Server', () => {
   const app = createSkillsApiServer({ logging: false });
 
   describe('GET /', () => {
-    it('returns API information', async () => {
+    it('returns HTML landing page', async () => {
       const res = await app.request('/');
       expect(res.status).toBe(200);
 
-      const body = await res.json();
-      expect(body.name).toBe('Skills.sh API');
-      expect(body.endpoints).toBeDefined();
+      const body = await res.text();
+      expect(body).toContain('<!DOCTYPE html>');
+      expect(body).toContain('skills.sh');
     });
   });
 
