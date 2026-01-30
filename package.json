@@ -1,0 +1,69 @@
+{
+  "name": "@mastra/skills-api",
+  "version": "0.0.1",
+  "description": "API server for skills.sh - a marketplace for Agent Skills",
+  "type": "module",
+  "files": [
+    "dist",
+    "CHANGELOG.md"
+  ],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "skills-api": "./dist/bin.js"
+  },
+  "scripts": {
+    "build:lib": "tsup --silent --config tsup.config.ts",
+    "build:watch": "pnpm build:lib --watch",
+    "dev": "tsx watch src/bin.ts",
+    "start": "node dist/bin.js",
+    "scrape": "tsx src/scraper/scrape.ts",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "mastra",
+    "skills",
+    "agents",
+    "ai"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.978.0",
+    "@hono/node-server": "^1.13.7",
+    "gray-matter": "^4.0.3",
+    "hono": "^4.11.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.7",
+    "tsup": "^8.5.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^4.0.16"
+  },
+  "homepage": "https://skills.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mastra-ai/mastra.git",
+    "directory": "explorations/skills-api"
+  },
+  "bugs": {
+    "url": "https://github.com/mastra-ai/mastra/issues"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}
