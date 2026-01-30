@@ -4,10 +4,12 @@
  */
 
 import { Hono } from 'hono';
+import { compress } from 'hono/compress';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { prettyJSON } from 'hono/pretty-json';
 
+import { getMetadata } from './registry/index.js';
 import { adminRouter } from './routes/admin.js';
 import { skillsRouter } from './routes/index.js';
 import { startRefreshScheduler } from './scheduler/index.js';
@@ -84,6 +86,31 @@ export function createSkillsApiServer(options: SkillsApiServerOptions = {}): Hon
   }
 
   app.use('*', prettyJSON());
+  app.use('*', compress());
+
+  // Cache headers
+  app.use(`${prefix}/skills/*`, async (c, next) => {
+    await next();
+
+    const path = c.req.path;
+
+    // GitHub-fetched content gets a longer cache (already S3-cached server-side)
+    if (path.endsWith('/files') || path.endsWith('/content')) {
+      c.header('Cache-Control', 'public, max-age=3600, stale-while-revalidate=60');
+      return;
+    }
+
+    // All other skills API routes: cache with ETag based on data freshness
+    const etag = `"${getMetadata().scrapedAt}"`;
+    const ifNoneMatch = c.req.header('If-None-Match');
+
+    if (ifNoneMatch === etag) {
+      return c.body(null, 304);
+    }
+
+    c.header('Cache-Control', 'public, max-age=300, stale-while-revalidate=60');
+    c.header('ETag', etag);
+  });
 
   // Health check
   app.get('/health', c => {

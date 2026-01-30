@@ -9,6 +9,17 @@ import type { RegistrySkill, ScrapedData, Source } from './types.js';
 // Cache for skills data
 let cachedData: ScrapedData | null = null;
 
+// Cached aggregation results (invalidated on reload)
+let cachedSources: Source[] | null = null;
+let cachedOwners: Array<{ owner: string; skillCount: number; totalInstalls: number }> | null = null;
+let cachedTopSkills: Map<number, RegistrySkill[]> = new Map();
+
+function clearAggregationCaches(): void {
+  cachedSources = null;
+  cachedOwners = null;
+  cachedTopSkills = new Map();
+}
+
 /**
  * Get the current scraped data, loading if necessary
  */
@@ -24,6 +35,7 @@ function getData(): ScrapedData {
  */
 export function reloadData(): void {
   cachedData = loadSkillsData();
+  clearAggregationCaches();
 }
 
 /**
@@ -31,6 +43,7 @@ export function reloadData(): void {
  */
 export async function reloadDataAsync(): Promise<void> {
   cachedData = await loadSkillsDataAsync();
+  clearAggregationCaches();
 }
 
 /**
@@ -93,6 +106,8 @@ export const metadata = new Proxy({} as ReturnType<typeof getMetadata>, {
  * Get all unique sources (repositories) with counts
  */
 export function getSources(): Source[] {
+  if (cachedSources) return cachedSources;
+
   const sourceMap = new Map<string, Source>();
   const skillsData = getSkills();
 
@@ -112,13 +127,16 @@ export function getSources(): Source[] {
     }
   }
 
-  return Array.from(sourceMap.values()).sort((a, b) => b.totalInstalls - a.totalInstalls);
+  cachedSources = Array.from(sourceMap.values()).sort((a, b) => b.totalInstalls - a.totalInstalls);
+  return cachedSources;
 }
 
 /**
  * Get all unique owners with counts
  */
 export function getOwners(): Array<{ owner: string; skillCount: number; totalInstalls: number }> {
+  if (cachedOwners) return cachedOwners;
+
   const ownerMap = new Map<string, { owner: string; skillCount: number; totalInstalls: number }>();
   const skillsData = getSkills();
 
@@ -136,14 +154,20 @@ export function getOwners(): Array<{ owner: string; skillCount: number; totalIns
     }
   }
 
-  return Array.from(ownerMap.values()).sort((a, b) => b.totalInstalls - a.totalInstalls);
+  cachedOwners = Array.from(ownerMap.values()).sort((a, b) => b.totalInstalls - a.totalInstalls);
+  return cachedOwners;
 }
 
 /**
  * Get top skills by installs
  */
 export function getTopSkills(limit = 100): RegistrySkill[] {
-  return [...getSkills()].sort((a, b) => b.installs - a.installs).slice(0, limit);
+  const cached = cachedTopSkills.get(limit);
+  if (cached) return cached;
+
+  const result = [...getSkills()].sort((a, b) => b.installs - a.installs).slice(0, limit);
+  cachedTopSkills.set(limit, result);
+  return result;
 }
 
 /**
