@@ -141,6 +141,164 @@ export function validateScrapedData(
   };
 }
 
+export interface FilterStaleResult {
+  filtered: EnrichedSkill[];
+  removed: number;
+  removedSkills: Array<{ skillId: string; source: string }>;
+  reposChecked: number;
+  skipped: boolean;
+}
+
+/**
+ * Filter stale skills by checking if they actually exist in their GitHub repos.
+ * Groups skills by source repo, fetches the tree for each, and drops skills
+ * whose skillId doesn't match any directory containing a SKILL.md.
+ *
+ * Only drops skills from repos where registry count > actual SKILL.md count,
+ * so single-skill repos with mismatched names are never affected.
+ *
+ * Requires GITHUB_TOKEN env var for authenticated API access (5,000 req/hr).
+ */
+export async function filterStaleSkills(
+  skills: EnrichedSkill[],
+): Promise<FilterStaleResult> {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) {
+    console.warn('[Validate] GITHUB_TOKEN not set, skipping stale skill filtering');
+    return { filtered: skills, removed: 0, removedSkills: [], reposChecked: 0, skipped: true };
+  }
+
+  // Group skills by source repo
+  const byRepo = new Map<string, EnrichedSkill[]>();
+  for (const skill of skills) {
+    const existing = byRepo.get(skill.source) || [];
+    existing.push(skill);
+    byRepo.set(skill.source, existing);
+  }
+
+  console.info(`[Validate] Checking ${byRepo.size} repos for stale skills...`);
+
+  const kept: EnrichedSkill[] = [];
+  const removedSkills: Array<{ skillId: string; source: string }> = [];
+  let reposChecked = 0;
+
+  // Process repos in parallel batches to respect rate limits
+  const BATCH_SIZE = 20;
+  const repos = Array.from(byRepo.entries());
+
+  for (let i = 0; i < repos.length; i += BATCH_SIZE) {
+    const batch = repos.slice(i, i + BATCH_SIZE);
+
+    const results = await Promise.all(
+      batch.map(async ([source, repoSkills]) => {
+        const [owner, repo] = source.split('/');
+        const actualDirs = await fetchSkillDirs(owner, repo, token);
+
+        // If we couldn't fetch the tree (rate limit, network error), keep all skills
+        if (actualDirs === null) {
+          return { kept: repoSkills, removed: [] as Array<{ skillId: string; source: string }> };
+        }
+
+        reposChecked++;
+
+        // If repo has no SKILL.md files at all, it was deleted or restructured
+        if (actualDirs.size === 0) {
+          return {
+            kept: [] as EnrichedSkill[],
+            removed: repoSkills.map((s) => ({ skillId: s.skillId, source: s.source })),
+          };
+        }
+
+        // If actual count >= registry count, no stales possible
+        if (actualDirs.size >= repoSkills.length) {
+          return { kept: repoSkills, removed: [] as Array<{ skillId: string; source: string }> };
+        }
+
+        // Registry has more skills than actual dirs — some are stale.
+        // Keep skills whose skillId matches an actual directory name.
+        const matched: EnrichedSkill[] = [];
+        const unmatched: EnrichedSkill[] = [];
+
+        for (const skill of repoSkills) {
+          if (actualDirs.has(skill.skillId) || actualDirs.has(skill.name)) {
+            matched.push(skill);
+          } else {
+            unmatched.push(skill);
+          }
+        }
+
+        // We know there are (repoSkills.length - actualDirs.size) stale entries.
+        // The unmatched ones are the stale candidates.
+        // If we have more matched than actual dirs, keep all matched (some dirs have multiple names).
+        // Otherwise, drop unmatched skills.
+        return {
+          kept: matched,
+          removed: unmatched.map((s) => ({ skillId: s.skillId, source: s.source })),
+        };
+      }),
+    );
+
+    for (const result of results) {
+      kept.push(...result.kept);
+      removedSkills.push(...result.removed);
+    }
+  }
+
+  if (removedSkills.length > 0) {
+    console.info(`[Validate] Removed ${removedSkills.length} stale skills from ${reposChecked} repos checked`);
+    for (const s of removedSkills.slice(0, 20)) {
+      console.info(`[Validate]   - ${s.source}/${s.skillId}`);
+    }
+    if (removedSkills.length > 20) {
+      console.info(`[Validate]   ... and ${removedSkills.length - 20} more`);
+    }
+  } else {
+    console.info(`[Validate] No stale skills found (checked ${reposChecked} repos)`);
+  }
+
+  return { filtered: kept, removed: removedSkills.length, removedSkills, reposChecked, skipped: false };
+}
+
+/**
+ * Fetch the set of directory names that contain a SKILL.md in a GitHub repo.
+ * Returns null if the tree couldn't be fetched (don't remove skills we can't verify).
+ */
+async function fetchSkillDirs(
+  owner: string,
+  repo: string,
+  token: string,
+): Promise<Set<string> | null> {
+  try {
+    const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/main?recursive=1`;
+    const response = await fetch(url, {
+      headers: {
+        Accept: 'application/vnd.github.v3+json',
+        Authorization: `Bearer ${token}`,
+        'User-Agent': 'skills-api',
+      },
+    });
+
+    // Rate limited or error — don't remove skills we can't verify
+    if (!response.ok) return null;
+
+    const tree = (await response.json()) as { tree: Array<{ path: string; type: string }> };
+    const dirs = new Set<string>();
+
+    for (const item of tree.tree) {
+      if (item.type === 'blob' && item.path.endsWith('/SKILL.md')) {
+        // Extract the immediate parent directory name
+        const parentDir = item.path.slice(0, item.path.lastIndexOf('/'));
+        const dirName = parentDir.split('/').pop();
+        if (dirName) dirs.add(dirName);
+      }
+    }
+
+    return dirs;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Quick validation for emergency checks
  */

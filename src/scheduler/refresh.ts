@@ -4,7 +4,7 @@
  */
 
 import { scrapeSkills, enrichSkills, getUniqueSources, getUniqueOwners } from '../scraper/scrape.js';
-import { validateScrapedData, type ValidationResult } from '../scraper/validate.js';
+import { validateScrapedData, filterStaleSkills, type ValidationResult } from '../scraper/validate.js';
 import { saveSkillsDataAsync, getStorageInfo, getActiveStorageType, loadSkillsData } from '../storage/index.js';
 import { reloadDataAsync } from '../registry/data.js';
 
@@ -65,7 +65,16 @@ export async function refreshSkillsData(): Promise<RefreshResult> {
     }
 
     const scrapedSkills = await scrapeSkills();
-    const enriched = enrichSkills(scrapedSkills);
+    let enriched = enrichSkills(scrapedSkills);
+
+    // Filter stale skills that no longer exist in their GitHub repos
+    const staleResult = await filterStaleSkills(enriched);
+    if (!staleResult.skipped) {
+      enriched = staleResult.filtered;
+      if (staleResult.removed > 0) {
+        console.info(`[Scheduler] Filtered ${staleResult.removed} stale skills (${staleResult.reposChecked} repos checked)`);
+      }
+    }
 
     // Validate scraped data before saving
     const validation = validateScrapedData(enriched, {
