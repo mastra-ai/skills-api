@@ -112,10 +112,65 @@ export async function fetchSkillFromGitHub(
     }
   }
 
+  // Fallback: search the repo tree for any SKILL.md files
+  const treeResult = await findSkillInTree(owner, repo, branch);
+  if (treeResult) {
+    return treeResult;
+  }
+
   return {
     success: false,
     error: `Could not find SKILL.md for ${skillId} in ${owner}/${repo}`,
   };
+}
+
+/**
+ * Search the repo tree for SKILL.md files as a fallback
+ * when the skillId doesn't match the directory name
+ */
+async function findSkillInTree(
+  owner: string,
+  repo: string,
+  branch: string,
+): Promise<FetchSkillResult | null> {
+  try {
+    const url = `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`;
+    const response = await fetch(url, {
+      headers: {
+        Accept: 'application/vnd.github.v3+json',
+        'User-Agent': 'skills-api',
+      },
+    });
+
+    if (!response.ok) return null;
+
+    const tree = (await response.json()) as { tree: Array<{ path: string; type: string }> };
+    const skillFiles = tree.tree.filter(
+      (item) => item.type === 'blob' && item.path.endsWith('/SKILL.md'),
+    );
+
+    if (skillFiles.length === 0) return null;
+
+    // Fetch the first SKILL.md found
+    const skillPath = skillFiles[0].path;
+    const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${skillPath}`;
+    const rawResponse = await fetch(rawUrl);
+
+    if (!rawResponse.ok) return null;
+
+    const raw = await rawResponse.text();
+    const parsed = matter(raw);
+    const metadata = parsed.data as SkillContent['metadata'];
+    const instructions = parsed.content.trim();
+
+    return {
+      success: true,
+      content: { raw, metadata, instructions },
+      path: skillPath,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
