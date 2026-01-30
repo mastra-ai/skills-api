@@ -26,6 +26,7 @@
     "skills-api": "./dist/bin.js"
   },
   "scripts": {
+    "build": "tsup --silent --config tsup.config.ts",
     "build:lib": "tsup --silent --config tsup.config.ts",
     "build:watch": "pnpm build:lib --watch",
     "dev": "tsx watch src/bin.ts",
