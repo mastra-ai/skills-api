@@ -117,7 +117,7 @@ export async function loadSkillsDataAsync(): Promise<ScrapedData> {
 
   // Fall back to bundled
   const bundledData = loadFromBundled();
-  if (s3Configured) {
+  if (s3Configured && bundledData.skills.length > 0) {
     console.info('[Storage] S3 bucket empty, seeding from bundled data');
     saveToS3(bundledData).catch((err) => console.error('[Storage] Failed to seed S3:', err));
   }

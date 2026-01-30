@@ -26,7 +26,7 @@
     "skills-api": "./dist/bin.js"
   },
   "scripts": {
-    "build": "tsup --silent --config tsup.config.ts",
+    "build": "tsup --silent --config tsup.config.ts && mkdir -p registry && cp src/registry/scraped-skills.json registry/scraped-skills.json",
     "build:lib": "tsup --silent --config tsup.config.ts",
     "build:watch": "pnpm build:lib --watch",
     "dev": "tsx watch src/bin.ts",
