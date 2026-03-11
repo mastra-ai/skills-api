@@ -2,5 +2,5 @@ node_modules
 dist
 .turbo
 *.log
-registry/
+/registry/
 .mastra-om-repro
