@@ -5,10 +5,11 @@
 
 import { S3Client, GetObjectCommand, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 
-import type { ScrapedData } from '../registry/types.js';
+import type { ScrapedData, RefreshHistoryEntry } from '../registry/types.js';
 
 const S3_BUCKET = process.env.S3_BUCKET;
 const S3_KEY = process.env.S3_KEY || 'skills-data.json';
+const S3_REFRESH_HISTORY_KEY = process.env.S3_REFRESH_HISTORY_KEY || 'skills-refresh-history.json';
 const S3_REGION = process.env.S3_REGION || process.env.AWS_REGION || 'us-east-1';
 const S3_ENDPOINT = process.env.S3_ENDPOINT; // For S3-compatible services (MinIO, R2, etc.)
 
@@ -101,6 +102,63 @@ export async function saveToS3(data: ScrapedData): Promise<boolean> {
   } catch (error: unknown) {
     const err = error as { message?: string };
     console.error('[S3] Failed to save to S3:', err.message);
+    return false;
+  }
+}
+
+/**
+ * Load refresh history entries from S3
+ */
+export async function loadRefreshHistoryFromS3(): Promise<RefreshHistoryEntry[] | null> {
+  if (!S3_BUCKET) return null;
+
+  try {
+    const client = getS3Client();
+    const command = new GetObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: S3_REFRESH_HISTORY_KEY,
+    });
+
+    const response = await client.send(command);
+    const body = await response.Body?.transformToString();
+    if (!body) return null;
+
+    const parsed = JSON.parse(body);
+    if (!Array.isArray(parsed)) return null;
+
+    console.info(`[S3] Loaded refresh history from s3://${S3_BUCKET}/${S3_REFRESH_HISTORY_KEY}`);
+    return parsed as RefreshHistoryEntry[];
+  } catch (error: unknown) {
+    const err = error as { name?: string; message?: string };
+    if (err.name === 'NoSuchKey' || err.name === 'NotFound') {
+      return null;
+    }
+    console.error('[S3] Failed to load refresh history from S3:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Save refresh history entries to S3
+ */
+export async function saveRefreshHistoryToS3(history: RefreshHistoryEntry[]): Promise<boolean> {
+  if (!S3_BUCKET) return false;
+
+  try {
+    const client = getS3Client();
+    const command = new PutObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: S3_REFRESH_HISTORY_KEY,
+      Body: JSON.stringify(history, null, 2),
+      ContentType: 'application/json',
+    });
+
+    await client.send(command);
+    console.info(`[S3] Saved refresh history to s3://${S3_BUCKET}/${S3_REFRESH_HISTORY_KEY}`);
+    return true;
+  } catch (error: unknown) {
+    const err = error as { message?: string };
+    console.error('[S3] Failed to save refresh history to S3:', err.message);
     return false;
   }
 }

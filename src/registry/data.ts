@@ -121,6 +121,7 @@ export function getSources(): Source[] {
         source: skill.source,
         owner: skill.owner,
         repo: skill.repo,
+        githubUrl: skill.githubUrl,
         skillCount: 1,
         totalInstalls: skill.installs,
       });

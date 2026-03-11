@@ -16,7 +16,15 @@ import {
   getTopSources,
   supportedAgents,
 } from '../registry/index.js';
-import type { PaginatedSkillsResponse, SkillSearchParams } from '../registry/types.js';
+import { getLastRefreshIncrement, getRefreshHistory } from '../scheduler/index.js';
+import type {
+  PaginatedSkillsResponse,
+  SkillSearchParams,
+  RegistrySkill,
+  IncrementalSkillUpdate,
+  RefreshHistoryEntry,
+  Source,
+} from '../registry/types.js';
 
 const skillsRouter = new Hono();
 
@@ -84,6 +92,72 @@ function searchSkills(params: SkillSearchParams): PaginatedSkillsResponse {
     pageSize,
     totalPages,
   };
+}
+
+type IncrementType = 'added' | 'removed' | 'updated';
+
+function parseIncrementType(typeQuery: string | undefined): IncrementType {
+  if (typeQuery === 'removed' || typeQuery === 'updated') {
+    return typeQuery;
+  }
+  return 'added';
+}
+
+function getEntryExpectedCount(entry: RefreshHistoryEntry, type: IncrementType): number {
+  if (type === 'removed') return entry.removed;
+  if (type === 'updated') return entry.updated;
+  return entry.added;
+}
+
+function getEntryItems(
+  entry: RefreshHistoryEntry,
+  type: IncrementType,
+  latestIncrement: ReturnType<typeof getLastRefreshIncrement>,
+): Array<RegistrySkill | IncrementalSkillUpdate> {
+  if (type === 'removed' && Array.isArray(entry.removedItems)) return entry.removedItems;
+  if (type === 'updated' && Array.isArray(entry.updatedItems)) return entry.updatedItems;
+  if (type === 'added' && Array.isArray(entry.addedItems)) return entry.addedItems;
+
+  // Backward compatibility for old history records without detail payload:
+  // if this entry is also the in-memory latest increment, use that detail.
+  if (latestIncrement?.recordedAt === entry.recordedAt) {
+    if (type === 'removed') return latestIncrement.removed;
+    if (type === 'updated') return latestIncrement.updated;
+    return latestIncrement.added;
+  }
+
+  return [];
+}
+
+function aggregateIncrementItemsBySource(items: Array<RegistrySkill | IncrementalSkillUpdate>): Source[] {
+  const sourceMap = new Map<string, Source>();
+
+  for (const item of items) {
+    const existing = sourceMap.get(item.source);
+    if (existing) {
+      existing.skillCount += 1;
+      existing.totalInstalls += item.installs;
+    } else {
+      sourceMap.set(item.source, {
+        source: item.source,
+        owner: item.owner,
+        repo: item.repo,
+        githubUrl: item.githubUrl,
+        skillCount: 1,
+        totalInstalls: item.installs,
+      });
+    }
+  }
+
+  return Array.from(sourceMap.values()).sort((a, b) => {
+    if (b.totalInstalls !== a.totalInstalls) {
+      return b.totalInstalls - a.totalInstalls;
+    }
+    if (b.skillCount !== a.skillCount) {
+      return b.skillCount - a.skillCount;
+    }
+    return a.source.localeCompare(b.source);
+  });
 }
 
 /**
@@ -219,6 +293,185 @@ skillsRouter.get('/stats', c => {
     totalSources: metadata.totalSources,
     totalOwners: metadata.totalOwners,
     totalInstalls,
+  });
+});
+
+/**
+ * GET /api/skills/incremental
+ * Get incremental changes from the latest successful refresh
+ *
+ * Query Parameters:
+ * - since: ISO timestamp. When provided, returns aggregated changes since this time
+ * - type: Change type (added, removed, updated), default: added
+ * - groupBy: source (optional). Aggregate returned items by source repository.
+ * - offset: Pagination offset, default: 0
+ * - limit: Items per page, default: 100, max: 1000
+ */
+skillsRouter.get('/incremental', async c => {
+  const type = parseIncrementType(c.req.query('type'));
+  const groupBy = c.req.query('groupBy');
+  const groupBySource = groupBy === 'source';
+  const offset = Math.max(0, parseInt(c.req.query('offset') || '0', 10));
+  const limit = Math.min(1000, Math.max(1, parseInt(c.req.query('limit') || '100', 10)));
+  const sinceQuery = c.req.query('since');
+
+  if (sinceQuery) {
+    const sinceMs = Date.parse(sinceQuery);
+    if (!Number.isFinite(sinceMs)) {
+      return c.json(
+        {
+          error: 'Invalid since timestamp. Use ISO 8601 format.',
+          example: '2026-03-10T07:30:00.000Z',
+        },
+        400,
+      );
+    }
+
+    const history = await getRefreshHistory();
+    const entries = history
+      .filter(entry => Date.parse(entry.recordedAt) > sinceMs)
+      .sort((a, b) => Date.parse(a.recordedAt) - Date.parse(b.recordedAt));
+
+    const latestIncrement = getLastRefreshIncrement();
+    const entryDetails = entries.map(entry => {
+      const detailItems = getEntryItems(entry, type, latestIncrement);
+      const expected = getEntryExpectedCount(entry, type);
+      const detailsAvailable = expected === 0 || detailItems.length > 0;
+
+      return {
+        recordedAt: entry.recordedAt,
+        previousScrapedAt: entry.previousScrapedAt,
+        currentScrapedAt: entry.currentScrapedAt,
+        added: entry.added,
+        removed: entry.removed,
+        updated: entry.updated,
+        detailsAvailable,
+        detailCount: detailItems.length,
+        detailItems,
+      };
+    });
+
+    const summary = entries.reduce(
+      (acc, entry) => {
+        acc.added += entry.added;
+        acc.removed += entry.removed;
+        acc.updated += entry.updated;
+        return acc;
+      },
+      { added: 0, removed: 0, updated: 0 },
+    );
+
+    const items = entryDetails.flatMap(entry => entry.detailItems);
+    const paginatedItems = items.slice(offset, offset + limit);
+    const missingDetailEntries = entryDetails.filter(entry => !entry.detailsAvailable).length;
+
+    if (groupBySource) {
+      const sourceItems = aggregateIncrementItemsBySource(items);
+      const paginatedSources = sourceItems.slice(offset, offset + limit);
+
+      return c.json({
+        mode: 'since',
+        available: history.length > 0,
+        since: new Date(sinceMs).toISOString(),
+        until: getMetadata().scrapedAt,
+        refreshes: entries.length,
+        summary,
+        type,
+        groupBy: 'source',
+        total: sourceItems.length,
+        itemTotal: items.length,
+        offset,
+        limit,
+        hasMore: offset + paginatedSources.length < sourceItems.length,
+        details: {
+          complete: missingDetailEntries === 0,
+          missingEntries: missingDetailEntries,
+        },
+        sources: paginatedSources,
+        entries: entryDetails.map(({ detailItems, ...entry }) => entry),
+      });
+    }
+
+    return c.json({
+      mode: 'since',
+      available: history.length > 0,
+      since: new Date(sinceMs).toISOString(),
+      until: getMetadata().scrapedAt,
+      refreshes: entries.length,
+      summary,
+      type,
+      total: items.length,
+      offset,
+      limit,
+      hasMore: offset + paginatedItems.length < items.length,
+      details: {
+        complete: missingDetailEntries === 0,
+        missingEntries: missingDetailEntries,
+      },
+      items: paginatedItems,
+      entries: entryDetails.map(({ detailItems, ...entry }) => entry),
+    });
+  }
+
+  const increment = getLastRefreshIncrement();
+  if (!increment) {
+    return c.json({
+      mode: 'latest',
+      available: false,
+      message: 'No incremental data available yet. Trigger /api/admin/refresh first.',
+    });
+  }
+
+  const items = type === 'added' ? increment.added : type === 'removed' ? increment.removed : increment.updated;
+  const paginatedItems = items.slice(offset, offset + limit);
+
+  if (groupBySource) {
+    const sourceItems = aggregateIncrementItemsBySource(items);
+    const paginatedSources = sourceItems.slice(offset, offset + limit);
+
+    return c.json({
+      mode: 'latest',
+      available: true,
+      refresh: {
+        previousScrapedAt: increment.previousScrapedAt,
+        currentScrapedAt: increment.currentScrapedAt,
+        recordedAt: increment.recordedAt,
+      },
+      summary: {
+        added: increment.added.length,
+        removed: increment.removed.length,
+        updated: increment.updated.length,
+      },
+      type,
+      groupBy: 'source',
+      total: sourceItems.length,
+      itemTotal: items.length,
+      offset,
+      limit,
+      hasMore: offset + paginatedSources.length < sourceItems.length,
+      sources: paginatedSources,
+    });
+  }
+
+  return c.json({
+    mode: 'latest',
+    available: true,
+    refresh: {
+      previousScrapedAt: increment.previousScrapedAt,
+      currentScrapedAt: increment.currentScrapedAt,
+      recordedAt: increment.recordedAt,
+    },
+    summary: {
+      added: increment.added.length,
+      removed: increment.removed.length,
+      updated: increment.updated.length,
+    },
+    type,
+    total: items.length,
+    offset,
+    limit,
+    hasMore: offset + paginatedItems.length < items.length,
+    items: paginatedItems,
   });
 });
 

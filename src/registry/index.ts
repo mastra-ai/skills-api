@@ -1,4 +1,11 @@
-export type { RegistrySkill, ScrapedData, PaginatedSkillsResponse, SkillSearchParams, Source } from './types.js';
+export type {
+  RegistrySkill,
+  ScrapedData,
+  RefreshHistoryEntry,
+  PaginatedSkillsResponse,
+  SkillSearchParams,
+  Source,
+} from './types.js';
 export {
   skills,
   metadata,

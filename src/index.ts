@@ -9,6 +9,7 @@ export type { SkillsApiServerOptions } from './server.js';
 export type {
   RegistrySkill,
   ScrapedData,
+  RefreshHistoryEntry,
   PaginatedSkillsResponse,
   SkillSearchParams,
   Source,
@@ -62,6 +63,8 @@ export {
   isSchedulerRunning,
   isRefreshInProgress,
   getLastRefreshResult,
+  getLastRefreshIncrement,
+  getRefreshHistory,
   getCurrentDataTimestamp,
 } from './scheduler/index.js';
-export type { RefreshResult, RefreshSchedulerOptions } from './scheduler/index.js';
+export type { RefreshResult, RefreshSchedulerOptions, RefreshIncrement, IncrementalSkillUpdate } from './scheduler/index.js';

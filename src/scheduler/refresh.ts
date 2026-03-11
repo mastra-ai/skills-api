@@ -5,8 +5,16 @@
 
 import { scrapeSkills, enrichSkills, getUniqueSources, getUniqueOwners } from '../scraper/scrape.js';
 import { validateScrapedData, filterStaleSkills, type ValidationResult } from '../scraper/validate.js';
-import { saveSkillsDataAsync, getStorageInfo, getActiveStorageType, loadSkillsData } from '../storage/index.js';
+import {
+  saveSkillsDataAsync,
+  getStorageInfo,
+  getActiveStorageType,
+  loadSkillsData,
+  loadRefreshHistoryAsync,
+  saveRefreshHistoryAsync,
+} from '../storage/index.js';
 import { reloadDataAsync } from '../registry/data.js';
+import type { RegistrySkill, ScrapedData, RefreshHistoryEntry } from '../registry/types.js';
 
 export interface RefreshResult {
   success: boolean;
@@ -20,6 +28,11 @@ export interface RefreshResult {
   savedTo?: { s3: boolean; filesystem: boolean };
   validation?: ValidationResult;
   skipped?: boolean;
+  changes?: {
+    added: number;
+    removed: number;
+    updated: number;
+  };
 }
 
 export interface RefreshSchedulerOptions {
@@ -33,9 +46,103 @@ export interface RefreshSchedulerOptions {
   refreshOnStart?: boolean;
 }
 
+export interface IncrementalSkillUpdate extends RegistrySkill {
+  previousInstalls: number;
+  currentInstalls: number;
+  installDelta: number;
+}
+
+export interface RefreshIncrement {
+  recordedAt: string;
+  previousScrapedAt: string | null;
+  currentScrapedAt: string;
+  added: RegistrySkill[];
+  removed: RegistrySkill[];
+  updated: IncrementalSkillUpdate[];
+}
+
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let isRefreshing = false;
 let lastRefreshResult: RefreshResult | null = null;
+let lastRefreshIncrement: RefreshIncrement | null = null;
+let refreshHistoryCache: RefreshHistoryEntry[] | null = null;
+
+const MAX_REFRESH_HISTORY_ENTRIES = 1000;
+
+function getSkillKey(skill: Pick<RegistrySkill, 'source' | 'skillId'>): string {
+  return `${skill.source}::${skill.skillId}`;
+}
+
+function buildRefreshIncrement(previousData: ScrapedData | null, currentData: ScrapedData): RefreshIncrement {
+  const previousSkills = previousData?.skills ?? [];
+  const previousMap = new Map<string, RegistrySkill>();
+  const currentMap = new Map<string, RegistrySkill>();
+
+  for (const skill of previousSkills) {
+    previousMap.set(getSkillKey(skill), skill);
+  }
+  for (const skill of currentData.skills) {
+    currentMap.set(getSkillKey(skill), skill);
+  }
+
+  const added: RegistrySkill[] = [];
+  const removed: RegistrySkill[] = [];
+  const updated: IncrementalSkillUpdate[] = [];
+
+  for (const [key, currentSkill] of currentMap.entries()) {
+    const previousSkill = previousMap.get(key);
+    if (!previousSkill) {
+      added.push(currentSkill);
+      continue;
+    }
+
+    if (previousSkill.installs !== currentSkill.installs) {
+      updated.push({
+        ...currentSkill,
+        previousInstalls: previousSkill.installs,
+        currentInstalls: currentSkill.installs,
+        installDelta: currentSkill.installs - previousSkill.installs,
+      });
+    }
+  }
+
+  for (const [key, previousSkill] of previousMap.entries()) {
+    if (!currentMap.has(key)) {
+      removed.push(previousSkill);
+    }
+  }
+
+  added.sort((a, b) => b.installs - a.installs);
+  removed.sort((a, b) => b.installs - a.installs);
+  updated.sort((a, b) => Math.abs(b.installDelta) - Math.abs(a.installDelta));
+
+  return {
+    recordedAt: new Date().toISOString(),
+    previousScrapedAt: previousData?.scrapedAt ?? null,
+    currentScrapedAt: currentData.scrapedAt,
+    added,
+    removed,
+    updated,
+  };
+}
+
+async function getRefreshHistoryCache(): Promise<RefreshHistoryEntry[]> {
+  if (!refreshHistoryCache) {
+    refreshHistoryCache = await loadRefreshHistoryAsync();
+  }
+  return refreshHistoryCache;
+}
+
+async function appendRefreshHistory(entry: RefreshHistoryEntry): Promise<void> {
+  const history = await getRefreshHistoryCache();
+  history.push(entry);
+
+  if (history.length > MAX_REFRESH_HISTORY_ENTRIES) {
+    history.splice(0, history.length - MAX_REFRESH_HISTORY_ENTRIES);
+  }
+
+  await saveRefreshHistoryAsync(history);
+}
 
 /**
  * Perform a single refresh of the skills data
@@ -112,13 +219,32 @@ export async function refreshSkillsData(): Promise<RefreshResult> {
 
     console.info(`[Scheduler] Validation passed: ${validation.stats.skillCount} skills, ${validation.stats.sourceCount} sources`);
 
-    const output = {
+    const output: ScrapedData = {
       scrapedAt: new Date().toISOString(),
       totalSkills: enriched.length,
       totalSources: getUniqueSources(scrapedSkills).length,
       totalOwners: getUniqueOwners(scrapedSkills).length,
       skills: enriched,
     };
+
+    const increment = buildRefreshIncrement(previousData, output);
+    lastRefreshIncrement = increment;
+    const historyEntry: RefreshHistoryEntry = {
+      recordedAt: increment.recordedAt,
+      previousScrapedAt: increment.previousScrapedAt,
+      currentScrapedAt: increment.currentScrapedAt,
+      added: increment.added.length,
+      removed: increment.removed.length,
+      updated: increment.updated.length,
+      addedItems: increment.added,
+      removedItems: increment.removed,
+      updatedItems: increment.updated,
+    };
+    try {
+      await appendRefreshHistory(historyEntry);
+    } catch (historyError) {
+      console.error('[Scheduler] Failed to persist refresh history:', historyError);
+    }
 
     // Save to storage (S3 + filesystem)
     const savedTo = await saveSkillsDataAsync(output);
@@ -136,11 +262,19 @@ export async function refreshSkillsData(): Promise<RefreshResult> {
       storageType,
       savedTo,
       validation,
+      changes: {
+        added: increment.added.length,
+        removed: increment.removed.length,
+        updated: increment.updated.length,
+      },
     };
 
     lastRefreshResult = result;
     console.info(
       `[Scheduler] Refresh complete: ${result.skillCount} skills, ${result.sourceCount} sources in ${result.durationMs}ms`,
+    );
+    console.info(
+      `[Scheduler] Incremental changes: +${result.changes?.added ?? 0} / -${result.changes?.removed ?? 0} / ~${result.changes?.updated ?? 0}`,
     );
     if (savedTo.s3) console.info('[Scheduler] Data saved to S3');
     if (savedTo.filesystem) console.info('[Scheduler] Data saved to filesystem');
@@ -233,6 +367,21 @@ export function isRefreshInProgress(): boolean {
  */
 export function getLastRefreshResult(): RefreshResult | null {
   return lastRefreshResult;
+}
+
+/**
+ * Get incremental changes from the latest successful refresh
+ */
+export function getLastRefreshIncrement(): RefreshIncrement | null {
+  return lastRefreshIncrement;
+}
+
+/**
+ * Get refresh history entries used for since-based incremental queries
+ */
+export async function getRefreshHistory(): Promise<RefreshHistoryEntry[]> {
+  const history = await getRefreshHistoryCache();
+  return [...history];
 }
 
 /**

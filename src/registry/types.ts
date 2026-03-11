@@ -26,6 +26,15 @@ export interface RegistrySkill {
 }
 
 /**
+ * Skill update delta between two refreshes
+ */
+export interface IncrementalSkillUpdate extends RegistrySkill {
+  previousInstalls: number;
+  currentInstalls: number;
+  installDelta: number;
+}
+
+/**
  * Scraped data file structure
  */
 export interface ScrapedData {
@@ -77,8 +86,29 @@ export interface Source {
   owner: string;
   /** Repository name */
   repo: string;
+  /** Full GitHub URL */
+  githubUrl: string;
   /** Number of skills in this repo */
   skillCount: number;
   /** Total installs across all skills */
   totalInstalls: number;
+}
+
+/**
+ * Refresh history entry used for "since" incremental summaries
+ */
+export interface RefreshHistoryEntry {
+  recordedAt: string;
+  previousScrapedAt: string | null;
+  currentScrapedAt: string;
+  added: number;
+  removed: number;
+  updated: number;
+  /**
+   * Optional detail payload for since-based incremental data queries.
+   * Older history entries may not contain these fields.
+   */
+  addedItems?: RegistrySkill[];
+  removedItems?: RegistrySkill[];
+  updatedItems?: IncrementalSkillUpdate[];
 }

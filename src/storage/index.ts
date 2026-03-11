@@ -9,12 +9,21 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { ScrapedData } from '../registry/types.js';
-import { isS3Configured, loadFromS3, saveToS3, getS3Info } from './s3.js';
+import type { ScrapedData, RefreshHistoryEntry } from '../registry/types.js';
+import {
+  isS3Configured,
+  loadFromS3,
+  saveToS3,
+  getS3Info,
+  loadRefreshHistoryFromS3,
+  saveRefreshHistoryToS3,
+} from './s3.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BUNDLED_DATA_PATH = join(__dirname, '..', 'registry', 'scraped-skills.json');
 const DATA_FILENAME = 'skills-data.json';
+const BUNDLED_REFRESH_HISTORY_PATH = join(__dirname, '..', 'registry', 'refresh-history.json');
+const REFRESH_HISTORY_FILENAME = 'refresh-history.json';
 
 export type StorageType = 's3' | 'filesystem' | 'bundled';
 
@@ -32,6 +41,15 @@ function getLocalDataPath(): string | null {
   const dataDir = getLocalDataDir();
   if (!dataDir) return null;
   return join(dataDir, DATA_FILENAME);
+}
+
+/**
+ * Get the path to the local refresh history file
+ */
+function getLocalRefreshHistoryPath(): string | null {
+  const dataDir = getLocalDataDir();
+  if (!dataDir) return null;
+  return join(dataDir, REFRESH_HISTORY_FILENAME);
 }
 
 /**
@@ -88,6 +106,66 @@ function saveToFilesystem(data: ScrapedData): boolean {
     return true;
   } catch (error) {
     console.error(`[Storage] Failed to save to ${localPath}:`, error);
+    return false;
+  }
+}
+
+/**
+ * Load refresh history from local filesystem
+ */
+function loadRefreshHistoryFromFilesystem(): RefreshHistoryEntry[] | null {
+  const localPath = getLocalRefreshHistoryPath();
+  if (localPath && existsSync(localPath)) {
+    try {
+      const content = readFileSync(localPath, 'utf-8');
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed)) {
+        return parsed as RefreshHistoryEntry[];
+      }
+    } catch (error) {
+      console.error(`[Storage] Failed to load refresh history from ${localPath}:`, error);
+    }
+  }
+  return null;
+}
+
+/**
+ * Load refresh history from bundled fallback
+ */
+function loadRefreshHistoryFromBundled(): RefreshHistoryEntry[] {
+  if (!existsSync(BUNDLED_REFRESH_HISTORY_PATH)) {
+    return [];
+  }
+
+  try {
+    const content = readFileSync(BUNDLED_REFRESH_HISTORY_PATH, 'utf-8');
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed)) {
+      return parsed as RefreshHistoryEntry[];
+    }
+  } catch (error) {
+    console.error('[Storage] Failed to load bundled refresh history:', error);
+  }
+
+  return [];
+}
+
+/**
+ * Save refresh history to local filesystem
+ */
+function saveRefreshHistoryToFilesystem(history: RefreshHistoryEntry[]): boolean {
+  const localPath = getLocalRefreshHistoryPath();
+  if (!localPath) return false;
+
+  try {
+    const dir = dirname(localPath);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+    writeFileSync(localPath, JSON.stringify(history, null, 2));
+    return true;
+  } catch (error) {
+    console.error(`[Storage] Failed to save refresh history to ${localPath}:`, error);
     return false;
   }
 }
@@ -179,6 +257,50 @@ export function saveSkillsData(data: ScrapedData): void {
 }
 
 /**
+ * Load refresh history entries from storage
+ * Priority: S3 > Filesystem > Bundled
+ */
+export async function loadRefreshHistoryAsync(): Promise<RefreshHistoryEntry[]> {
+  const s3Configured = isS3Configured();
+
+  if (s3Configured) {
+    const s3History = await loadRefreshHistoryFromS3();
+    if (s3History) return s3History;
+  }
+
+  const fsHistory = loadRefreshHistoryFromFilesystem();
+  if (fsHistory) return fsHistory;
+
+  return loadRefreshHistoryFromBundled();
+}
+
+/**
+ * Save refresh history entries to storage
+ * Saves to S3 if configured, and also to filesystem when available
+ */
+export async function saveRefreshHistoryAsync(history: RefreshHistoryEntry[]): Promise<{ s3: boolean; filesystem: boolean }> {
+  const results = { s3: false, filesystem: false };
+
+  if (isS3Configured()) {
+    results.s3 = await saveRefreshHistoryToS3(history);
+  }
+
+  if (getLocalDataDir()) {
+    results.filesystem = saveRefreshHistoryToFilesystem(history);
+  } else if (!results.s3) {
+    // Development only: persist alongside bundled data
+    try {
+      writeFileSync(BUNDLED_REFRESH_HISTORY_PATH, JSON.stringify(history, null, 2));
+      results.filesystem = true;
+    } catch (error) {
+      console.error('[Storage] Failed to save bundled refresh history:', error);
+    }
+  }
+
+  return results;
+}
+
+/**
  * Get the current data file path being used
  */
 export function getDataFilePath(): string {
@@ -239,4 +361,11 @@ export function getStorageInfo(): {
 }
 
 // Re-export S3 functions for direct access
-export { isS3Configured, loadFromS3, saveToS3, getS3Info } from './s3.js';
+export {
+  isS3Configured,
+  loadFromS3,
+  saveToS3,
+  getS3Info,
+  loadRefreshHistoryFromS3,
+  saveRefreshHistoryToS3,
+} from './s3.js';
